@@ -759,7 +759,7 @@ class SwinJSCC_Decoder(nn.Module):
             
         B, L, N = x.shape
         x = x.reshape(B, self.H, self.W, N).permute(0, 3, 1, 2)
-        x = torch.clamp(x, 0.0, 1.0)
+        x = torch.clamp(x, min=0.0, max=1.0)
         return x
 
     def _init_weights(self, m):
@@ -904,19 +904,22 @@ class SwinJSCC(nn.Module):
         enc_output, mask = self.encoder(x, snr, rate, self.model_mode)
 
         # ========== 2. 信道前向 ==========
-        if self.pass_channel:
-            channel_output = self.channel.forward(enc_output, snr)
-        else:
-            channel_output = enc_output
-
         if self.model_mode == 'SwinJSCC_w/o_SAandRA' or self.model_mode == 'SwinJSCC_w/_SA':
             CBR = enc_output.numel() / 2 / x.numel()
+            if self.pass_channel:
+                channel_output = self.channel.forward(enc_output, snr)
+            else:
+                channel_output = enc_output
         elif self.model_mode == 'SwinJSCC_w/_RA' or self.model_mode == 'SwinJSCC_w/_SAandRA':
             CBR = rate / (2 * 3 * 4 ** (self.downsample))
+            avg_pwr = torch.sum(enc_output ** 2) / mask.sum()
+            if self.pass_channel:
+                channel_output = self.channel.forward(enc_output, snr, True, avg_pwr)
+            else:
+                channel_output = enc_output
             channel_output *= mask
         #========== 3. 解码器前向 ==========
         recon_image = self.decoder.forward(channel_output, snr, self.model_mode)
-        # recon_image = torch.clamp(recon_image, min=0.0, max=1.0)
         return recon_image, CBR
         
 

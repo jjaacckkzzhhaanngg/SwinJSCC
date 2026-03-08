@@ -433,7 +433,7 @@ class SwinJSCC_Encoder(nn.Module):
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer_Encoder(
-                dim=int(embed_dims[i_layer - 1]) if i_layer != 0 else 3,  # 第一层输入通道为3（RGB），后续为上一层的输出维度
+                dim=int(embed_dims[i_layer - 1]) if i_layer != 0 else self.in_chans,  # 第一层输入通道为3（RGB），后续为上一层的输出维度
                 out_dim=int(embed_dims[i_layer]),  # 当前层的输出通道数
                 input_resolution=(self.patches_resolution[0] // (2 ** i_layer),  # 当前层的输入分辨率（第i层经过i次下采样）
                                   self.patches_resolution[1] // (2 ** i_layer)),
@@ -602,7 +602,7 @@ class SwinJSCC_Decoder(nn.Module):
     2. 空间分辨率递增（通过 PatchReverseMerging 上采样）
     3. 支持4种模式（RA模式在编码器已完成掩码选择，解码器仅需SA）
     """
-    def __init__(self, model, img_size, embed_dims, depths, num_heads, C,
+    def __init__(self, model, img_size, embed_dims, depths, num_heads, C, out_chans=3, 
                  window_size=4, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  bottleneck_dim=16):
@@ -615,6 +615,7 @@ class SwinJSCC_Decoder(nn.Module):
             depths: 每一层包含的SwinTransformerBlock数量列表（与编码器一致）
             num_heads: 每一层的注意力头数列表（解码器顺序与编码器相反）
             C: 接收到的传输特征维度（与编码器的C一致）
+            out_chans: 输出通道数，默认3（RGB图像）
             window_size: 窗口大小，默认4
             mlp_ratio: MLP隐藏层维度与输入维度的比例，默认4.0
             qkv_bias: 是否为Q/K/V添加可学习偏置，默认True
@@ -635,6 +636,7 @@ class SwinJSCC_Decoder(nn.Module):
         self.mlp_ratio = mlp_ratio
         self.H = img_size[0]  # 最终输出图像高度
         self.W = img_size[1]  # 最终输出图像宽度
+        self.out_chans = out_chans
         
         # 计算初始特征图的分辨率（编码器的最终分辨率，解码器的初始分辨率）
         self.patches_resolution = (
@@ -657,7 +659,7 @@ class SwinJSCC_Decoder(nn.Module):
         for i_layer in range(self.num_layers):
             # 确定当前层的输入/输出通道
             dim = int(embed_dims[i_layer])
-            out_dim = int(embed_dims[i_layer + 1]) if (i_layer < self.num_layers - 1) else 3  # 最后一层输出3通道（RGB）
+            out_dim = int(embed_dims[i_layer + 1]) if (i_layer < self.num_layers - 1) else self.out_chans  # 最后一层输出3通道（RGB）
             
             # 确定当前层的输入分辨率（初始分辨率 * 2^i_layer）
             input_resolution = (
@@ -886,6 +888,7 @@ class SwinJSCC(nn.Module):
             depths=config.depths,
             num_heads=config.num_heads[::-1],
             C=self.C,  # 解码器输入维度为C（合并实/虚部后）
+            out_chans = getattr(config, 'in_chans', 3), # 输出通道与输入通道相等。
             window_size=getattr(config, 'window_size', 4),
             mlp_ratio=getattr(config, 'mlp_ratio', 4.0),
             qkv_bias=getattr(config, 'qkv_bias', True),
@@ -944,3 +947,4 @@ class SwinJSCC(nn.Module):
             f"trans_dim={self.C}, "
             f"channel_type={self.config.channel_type}"
         )
+    

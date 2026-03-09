@@ -67,7 +67,7 @@ def evaluate_and_visualize_superposition():
     # 4. 在整个数据集上进行推断
     print("开始在整个数据集上进行推断测试，这可能需要一些时间...")
     with torch.no_grad():
-        for batch_idx, (images, _) in enumerate(val_loader):
+        for batch_idx, images in enumerate(val_loader):
             # 如果最后一组只有一张图片，则跳过
             if len(images) < 2:
                 continue

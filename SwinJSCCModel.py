@@ -915,7 +915,15 @@ class SwinJSCC(nn.Module):
                 channel_output = enc_output
         elif self.model_mode == 'SwinJSCC_w/_RA' or self.model_mode == 'SwinJSCC_w/_SAandRA':
             CBR = rate / (2 * 3 * 4 ** (self.downsample))
-            avg_pwr = torch.sum(enc_output ** 2) / mask.sum()
+            # avg_pwr = torch.sum(enc_output ** 2) / mask.sum()
+            # --- 修改部分：逐样本（Per-sample）计算平均功率 ---
+            # 沿非 B 维度求和，保持 B 维度独立 (假设 enc_output 和 mask 是 3D 形状 B, L, C)
+            dims = tuple(range(1, enc_output.ndim))
+            sum_sq = torch.sum(enc_output ** 2, dim=dims, keepdim=True)
+            num_active = torch.sum(mask, dim=dims, keepdim=True).clamp_min(1.0) # 避免除零
+            
+            avg_pwr = sum_sq / num_active # 形状变为 (B, 1, 1)
+            # -----------------------------------------------
             if self.pass_channel:
                 channel_output = self.channel.forward(enc_output, snr, True, avg_pwr)
             else:

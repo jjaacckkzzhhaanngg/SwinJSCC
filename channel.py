@@ -218,26 +218,14 @@ class Channel1(nn.Module):
         return input_layer * h + noise
 
     def complex_normalize(self, x, power):
-        """
-        复数信号功率归一化（修复维度平均逻辑，单样本独立归一化）
-        :param x: 复数信号（实部+虚部分开的张量），形状支持4D (B,C,H,W)
-        :param power: 目标功率
-        :return: 归一化后的信号和功率
-        """
-        # 仅对单样本的 C/H/W 维度求平均，保留batch维度独立性
-        # keepdim=True 保证广播时维度匹配
         pwr_per_sample = torch.mean(x ** 2, dim=tuple(range(1, x.ndim)), keepdim=True) * 2
-        # 数值稳定性：避免除零
         pwr_per_sample = pwr_per_sample.clamp_min(self.eps)
         
-        # 计算缩放因子，逐样本独立归一化到目标功率
         scale = torch.sqrt(torch.tensor(power, device=x.device, dtype=x.dtype)) / torch.sqrt(pwr_per_sample)
         out = x * scale
         
-        # 兼容原有返回格式：返回标量（全局平均）保持接口不变
-        # 注：内部已按单样本归一化，返回的pwr为全局平均功率（兼容原接口）
-        pwr_global = torch.mean(pwr_per_sample)
-        return out, pwr_global
+        # 🚀 终极修复：直接返回保留了 (B, 1, ...) 维度的独立功率，不要再求 mean()
+        return out, pwr_per_sample
 
     """
     def forward(self, input, chan_param, use_avg_pwr=False, avg_pwr_value=1.0):
@@ -372,3 +360,4 @@ class Channel1(nn.Module):
         """
         channel_tx, _ = self.complex_normalize(channel_in, power=1.0)
         return channel_tx
+

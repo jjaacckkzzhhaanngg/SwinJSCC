@@ -12,6 +12,7 @@ from tqdm import tqdm
 import time
 from pathlib import Path
 import torch.nn.functional as F
+import torchvision.models as models
 
 # 假设你的模型文件在当前目录
 from SwinJSCCModel import SwinJSCC
@@ -26,6 +27,41 @@ import matplotlib
 # 服务器环境自动切换非交互式后端
 if os.environ.get('DISPLAY', '') == '' and matplotlib.get_backend() != 'Agg':
     matplotlib.use('Agg')
+
+class VGGPerceptualLoss(nn.Module):
+    def __init__(self, resize=True):
+        super(VGGPerceptualLoss, self).__init__()
+        blocks = []
+        # 加载预训练的 VGG16 的前几层特征提取块
+        blocks.append(models.vgg16(weights=models.VGG16_Weights.DEFAULT).features[:4].eval())
+        blocks.append(models.vgg16(weights=models.VGG16_Weights.DEFAULT).features[4:9].eval())
+        blocks.append(models.vgg16(weights=models.VGG16_Weights.DEFAULT).features[9:16].eval())
+        for bl in blocks:
+            for p in bl.parameters():
+                p.requires_grad = False # 冻结 VGG 参数，不参与训练
+        self.blocks = nn.ModuleList(blocks)
+        self.transform = F.interpolate
+        self.resize = resize
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def forward(self, input, target):
+        # 将输入规范化到 ImageNet 分布
+        input = (input - self.mean) / self.std
+        target = (target - self.mean) / self.std
+        if self.resize:
+            input = self.transform(input, mode='bilinear', size=(224, 224), align_corners=False)
+            target = self.transform(target, mode='bilinear', size=(224, 224), align_corners=False)
+        
+        loss = 0.0
+        x = input
+        y = target
+        for block in self.blocks:
+            x = block(x)
+            y = block(y)
+            # 在特征图层级使用 L1 误差，强化纹理相似度
+            loss += F.l1_loss(x, y)
+        return loss
 
 def get_config():
     """
@@ -99,7 +135,7 @@ def get_config():
         batch_size=16,                    # 批次大小
         num_epochs=80,                   # 训练轮数
         num_workers=4,                    # DataLoader 的工作进程数
-        alpha=0.3,                        # 损失函数超参数（用于平衡 L2-loss 和 MS-SSIM）
+        alpha=0.84,                        # 损失函数超参数（用于平衡 L2-loss 和 MS-SSIM）
         
         # 梯度和数值稳定性
         grad_clip=1.0,                    # 梯度裁剪阈值（None 则不裁剪）
@@ -114,7 +150,7 @@ def get_config():
         log_interval=10,                  # 每隔多少 batch 打印一次日志
         
         # 模型保存
-        model_name = "SwinJSCC_SAandRA_B1_", # 保存的模型名称
+        model_name = "SwinJSCC_SAandRA_B3_", # 保存的模型名称
         save_dir='./checkpoints',         # 模型保存目录
         save_interval=10,                 # 每隔多少 epoch 保存一次
         resume=None,                      # 恢复训练的检查点路径（None 则从头训练）
@@ -344,6 +380,7 @@ class Trainer:
         
         # 初始化损失函数
         self.criterion = Distortion(config).to(self.device)
+        self.perceptual_criterion = VGGPerceptualLoss().to(self.device)
         
         # 初始化优化器
         self.optimizer = self._get_optimizer()
@@ -470,10 +507,10 @@ class Trainer:
             # 早期训练使用高 SNR/高 rate，后期逐渐降低
             progress = epoch / self.config.num_epochs
             if progress < 0.3:
-                snr = random.choice(self.config.multiple_snrs[-2:])  # 高 SNR
+                snr = random.choice(self.config.multiple_snrs[-1:])  # 高 SNR
                 rate = random.choice(self.config.channel_numbers[-1:])  # 高 rate
             elif progress < 0.6:
-                snr = random.choice(self.config.multiple_snrs[1:-1])  # 中 SNR
+                snr = random.choice(self.config.multiple_snrs[-1:])  # 中 SNR
                 rate = random.choice(self.config.channel_numbers)  # 全部 rate
             else:
                 snr = random.choice(self.config.multiple_snrs)  # 全部 SNR
@@ -485,13 +522,20 @@ class Trainer:
                     recon_images, CBR = self.model(images, snr=snr, rate=rate)
                     images_fp32 = images.float()
                     recon_images_fp32 = recon_images.float()
+                    # 1. 结构失真损失 (MS-SSIM)
                     loss = self.criterion(recon_images_fp32, images_fp32)
-                    loss_l2 = F.mse_loss(recon_images_fp32, images_fp32)
+                    # 2. 像素失真损失 (使用 L1 替代 MSE，L1 不容易模糊)
+                    loss_l1 = F.l1_loss(recon_images_fp32, images_fp32)
+                    # loss_l2 = F.mse_loss(recon_images_fp32, images_fp32)  # 可选：同时计算 L2 以供分析，但不参与最终损失
+                    # 3. 感知/纹理损失 (VGG Loss)
+                    loss_perceptual = self.perceptual_criterion(recon_images_fp32, images_fp32)
             else:
                 recon_images, CBR = self.model(images, snr=snr, rate=rate)
                 loss = self.criterion(recon_images, images)
-                loss_l2 = F.mse_loss(recon_images, images)
-            loss = self.config.alpha * loss + (1 - self.config.alpha) * loss_l2
+                # loss_l2 = F.mse_loss(recon_images, images)
+                loss_l1 = F.l1_loss(recon_images, images)
+                loss_perceptual = self.perceptual_criterion(recon_images, images)
+            loss = 0.3 * loss + 0.6 * loss_l1 + 0.1 * loss_perceptual
             
             # 反向传播
             self.optimizer.zero_grad()

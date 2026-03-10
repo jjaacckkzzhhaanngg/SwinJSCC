@@ -51,7 +51,7 @@ def get_config():
         C=192,                       # 传输维度，对应CBR为0.125（必须是偶数，用于实部/虚部分离）
         
         # 窗口和 MLP 参数
-        window_size=4,               # 窗口大小（必须能整除各层特征图尺寸：32, 16, 8）
+        window_size=8,               # 窗口大小（必须能整除各层特征图尺寸：32, 16, 8）
         mlp_ratio=4.0,               # MLP 隐藏层维度 = mlp_ratio × embed_dim
         qkv_bias=True,               # Q/K/V 是否使用偏置
         qk_scale=None,               # Q/K 缩放因子（None 则自动计算）

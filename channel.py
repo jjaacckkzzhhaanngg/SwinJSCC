@@ -239,15 +239,14 @@ class Channel1(nn.Module):
         pwr_global = torch.mean(pwr_per_sample)
         return out, pwr_global
 
+    """
     def forward(self, input, chan_param, use_avg_pwr=False, avg_pwr_value=1.0):
-        """
         前向传播（接口完全不变）
         :param input: 输入信号（实部+虚部分开的张量）
         :param chan_param: 信道参数（SNR，单位dB）
         :param use_avg_pwr: 是否使用平均功率归一化（布尔开关）
         :param avg_pwr_value: 平均功率数值（仅当use_avg_pwr=True时生效）
         :return: 经过信道后的输出信号
-        """
         # 校验输入长度为偶数（实部+虚部分开）
         assert input.numel() % 2 == 0, \
             f"输入总元素数必须为偶数（实部虚部分开存储），当前元素数：{input.numel()}"
@@ -283,6 +282,54 @@ class Channel1(nn.Module):
                 return channel_output * restore_scale
             else:
                 restore_scale = torch.sqrt(torch.tensor(pwr, device=input.device, dtype=input.dtype))
+                return channel_output * restore_scale
+        else:
+            return channel_output"""
+    
+        
+    def forward(self, input, chan_param, use_avg_pwr=False, avg_pwr_value=1.0):
+        """
+        前向传播
+        """
+        # 校验输入长度为偶数（保证最后一个维度可以被平分）
+        assert input.shape[-1] % 2 == 0, \
+            f"输入特征通道数必须为偶数，当前通道数：{input.shape[-1]}"
+
+        # 1. 功率归一化
+        if use_avg_pwr:
+            # 【修改点 1】：avg_pwr_value 现在是 (B, 1, 1) 的张量
+            # 直接使用它进行计算，千万不要再用 torch.tensor() 去包裹它，否则会丢失梯度或报错
+            scale = torch.sqrt(torch.tensor(1.0, device=input.device, dtype=input.dtype)) / \
+                    torch.sqrt(avg_pwr_value * 2 + self.eps)
+            channel_tx = input * scale
+            pwr = avg_pwr_value * 2  # pwr 也是张量
+        else:
+            channel_tx, pwr = self.complex_normalize(input, power=1.0)
+
+        # 2. 调整输入形状：实部+虚部合并为复数
+        # 【修改点 2】：彻底修复 Batch 交叉污染的 Bug！
+        # 沿着最后一个维度（通道维度）拆分，绝不能用 reshape(-1) 把不同图片混在一起
+        C_dim = channel_tx.shape[-1]
+        channel_in_real = channel_tx[..., :C_dim // 2]
+        channel_in_imag = channel_tx[..., C_dim // 2:]
+        channel_in = channel_in_real + 1j * channel_in_imag
+
+        # 3. 复数域信道处理
+        channel_output = self.complex_forward(channel_in, chan_param)
+
+        # 4. 恢复形状：复数拆分为实部+虚部
+        # 【修改点 3】：沿着通道维度拼回去，此时形状天然就是对的，不需要再 reshape
+        channel_output = torch.cat([torch.real(channel_output), torch.imag(channel_output)], dim=-1)
+
+        # 5. 恢复功率归一化前的尺度
+        if self.chan_type in (1, 'awgn', 2, 'rayleigh'):
+            if use_avg_pwr:
+                # 【修改点 4】：直接使用计算好的张量 pwr
+                restore_scale = torch.sqrt(pwr)
+                return channel_output * restore_scale
+            else:
+                # pwr 可能是标量张量，直接开根号即可
+                restore_scale = torch.sqrt(pwr)
                 return channel_output * restore_scale
         else:
             return channel_output
